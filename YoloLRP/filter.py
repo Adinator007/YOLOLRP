@@ -3,7 +3,7 @@
 import torch
 
 
-def relevance_filter(r: torch.tensor, top_k_percent: float = 1.0) -> torch.tensor:
+def output_relevance_filter(r: torch.tensor, top_k_percent: float = 1.0) -> torch.tensor:
     """Filter that allows largest k percent values to pass for each batch dimension.
 
     Filter keeps k% of the largest tensor elements. Other tensor elements are set to

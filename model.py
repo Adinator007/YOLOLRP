@@ -121,14 +121,19 @@ class YOLOv3(nn.Module):
         self.layers = self._create_conv_layers()
 
     def forward(self, x):
+        x.requires_grad_(True)
         outputs = []  # for each scale
         route_connections = []
         for layer in self.layers:
             if isinstance(layer, ScalePrediction):
-                outputs.append(layer(x)) # ha scale prediction jon, akkor annak a kimenetet elmentjuk az outputs listaba, de nem
+                y = layer(x)
+                y.requires_grad_(True)
+                outputs.append(y) # ha scale prediction jon, akkor annak a kimenetet elmentjuk az outputs listaba, de nem
                 continue
 
             x = layer(x)
+
+            x.requires_grad_(True)
 
             # Residual Block ott van, ahonnan kicsatolunk skip connection-nel
 
@@ -137,6 +142,7 @@ class YOLOv3(nn.Module):
 
             elif isinstance(layer, nn.Upsample):
                 x = torch.cat([x, route_connections[-1]], dim=1)
+                x.requires_grad_(True)
                 route_connections.pop()
 
         return outputs # a 3 scaled prediction kimenetet tarolja el

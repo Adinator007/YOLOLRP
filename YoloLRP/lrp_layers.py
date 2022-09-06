@@ -7,7 +7,7 @@ import torch
 from torch import nn
 from torch.autograd import Variable
 
-from YoloLRP.filter import relevance_filter
+from YoloLRP.filter import output_relevance_filter
 from model import CNNBlock
 
 top_k_percent = 0.04  # Proportion of relevance scores that are allowed to pass.
