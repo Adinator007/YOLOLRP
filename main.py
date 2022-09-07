@@ -6,27 +6,60 @@ import torch
 import config
 from LRPBackwardHooks import lookup_hook_fn
 from YoloLRP.lrp import LRPModel
-from model import YOLOv3
+from model import YOLOv3, CNNBlock
 
-from Global import activations
+from Global import grads, activationss
+from utils import eval_lrp, get_loaders
 
-
-lista = []
 
 def store_activations(x, y, z): # maga a modell, a bemenete a layer nek
-    lista.append(y[0])
-    activations[x] = y[0]
+    activationss[x] = y[0]
 
 def b_hook(x, y, z):
     return torch.tensor([[99, 98, 97, 96, 95]]).float()
     # return torch.tensor([95]).float()
 
 
+import ctypes
+
 def main():
+    def save_grad(activation):
+        def hook(grad):
+            grads[id(activation)] = grad
+
+        return hook
+
+    '''
+    # conv = nn.Conv2d(10, 20, 3, 1)
+    f = CNNBlock(10, 20, kernel_size=3)
+
+    lut = lookup_hook_fn()
+    for name, module in f.named_modules():
+        module.register_forward_hook(store_activations)
+        if module.__class__ in lut.keys():
+            module.register_full_backward_hook(lut[module.__class__])
+
+    # x = torch.randn(1, 10, 30, 30).requires_grad_(True)
+    x = torch.randn(1, 10, 30, 30).requires_grad_(True)
+    out = f(x)
+
+    for activation in activationss.values():
+        activation.register_hook(save_grad(activation))
+    out.mean().backward()
+    print(grads[id(out)].shape)
+
+    return
+    '''
+
     from torch.profiler import profile, record_function, ProfilerActivity
 
     model = YOLOv3(num_classes=config.NUM_CLASSES).to(config.DEVICE)
     model.train()
+
+
+    _, loader, _ = get_loaders(train_csv_path=config.DATASET + "/train.csv", test_csv_path=config.DATASET + "/test.csv")
+    eval_lrp(model, loader)
+    return
 
     #torch torch.save(model, "bestModel.pth")
     '''torch.onnx.export(model,  # model being run
@@ -60,18 +93,24 @@ def main():
         with record_function("model_inference"):
 
             # net.weight = nn.Parameter(torch.zeros_like(net.weight))
-            yoloInput = torch.ones(2, 3, 416, 416).float().to(config.DEVICE)
+            yoloInput = nn.Parameter(torch.ones(2, 3, 416, 416).float().to(config.DEVICE))
             # yoloInput.requires_grad = True
             res = model(yoloInput)
 
-            global activations
-            activations = [activations[a].data.requires_grad_(True) for a in list(activations)]
+            # activationss = [activationss[a].data.requires_grad_(True) for a in list(activationss)]
+            for activation in activationss.values():
+                activation.register_hook(save_grad(activation))
+            '''
+            lista = [a.data.requires_grad_(True) for a in lista]
+            '''
             # lista = [a.requires_grad_]
 
             # torch.autograd.gradcheck(model, yoloInput)
             torch.sum(res[0][:, :, :, :]).backward(retain_graph=True)
             # optimizer.step()
-            print("ok")
+            # print("ok")
+
+
 
 
     '''
@@ -110,7 +149,18 @@ def main():
     '''
 
 
+
+
+
 def main2():
+
+    def save_grad(activation):
+        def hook(grad):
+            grads[activation] = grad
+
+        return hook
+
+
     def backward_hook(m, input_gradients, output_gradients):
         print('input_gradients {}'.format(input_gradients))
         print('output_gradients {}'.format(output_gradients))
@@ -125,16 +175,17 @@ def main2():
     a = nn.Parameter(torch.tensor([3, 4]))
     out = l(a)
     out.mean().backward()
-
-
     '''
     conv = nn.Conv2d(1, 1, 3, bias = False)
-    conv.register_full_backward_hook(backward_hook)
+    # conv.register_full_backward_hook(backward_hook)
 
     x = torch.randn(1, 1, 3, 3).requires_grad_(True)
     out = conv(x)
+    out.register_hook(save_grad("out"))
     out.mean().backward()
-    print(x.grad.shape)  # ones
+    print(grads["out"].shape)  # ones
+
+
 
 if __name__ == '__main__':
     main()

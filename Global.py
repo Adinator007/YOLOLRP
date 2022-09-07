@@ -1,1 +1,2 @@
-activations = {}
+activationss = {}
+grads = {}

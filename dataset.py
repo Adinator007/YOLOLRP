@@ -2,10 +2,6 @@
 Creates a Pytorch dataset to load the Pascal VOC & MS COCO datasets
 """
 
-import wandb
-
-wandb.init()
-
 
 import numpy as np
 import os
@@ -66,18 +62,20 @@ class YOLODataset(Dataset):
             iou_anchors = iou_width_height(torch.tensor(box[2:4]), self.anchors) # calculate iou for this particular box and ALL the anchors
             anchor_indices = iou_anchors.argsort(descending=True, dim=0) # first -> best anchor
             x, y, width, height, class_label = box
-            has_anchor = [False] * 3  # there must be an anchor for each bb in each scale, egyelore nincs
-            for anchor_idx in anchor_indices:
+            has_anchor = [False] * 3  # there must be an anchor for each bb in each scale, there is an anchor for each scale for each bb. Vagyis azt akarjuk, hogy minden gt boxot minden scale tudjon predikalni
+            for anchor_idx in anchor_indices: # megyunk vegig a legjobban illeszkedo anchor okon es mindig az elso kerul a scale hez
                 # which scale
                 scale_idx = anchor_idx // self.num_anchors_per_scale # melyik scale hez tartozik az anchor. Pl, ha 8 az anchor_idx akkor 8//3(mert ennyi van egy scale en) az 2 ot ad, ami az utolso scale
                 # which anchor on that particular scale
                 anchor_on_scale = anchor_idx % self.num_anchors_per_scale # [0, 1, 2]. Ezen az adott scale en melyik anchor hoz rendeljuk ezt a bb t
-                S = self.S[scale_idx]
+                S = self.S[scale_idx] # how many cells in this particular scale that we are looking at
                 i, j = int(S * y), int(S * x)  # melyik cell a grid ben az amiben benne van a bb kozepe
                 anchor_taken = targets[scale_idx][anchor_on_scale, i, j, 0] # ez az anchor foglalt e mar ez a cella
                 if not anchor_taken and not has_anchor[scale_idx]:
-                    targets[scale_idx][anchor_on_scale, i, j, 0] = 1 # mivel ebben a cellaban nincs senki, ezert most beletesszuk ezt a mostanit
+                    targets[scale_idx][anchor_on_scale, i, j, 0] = 1 # conf ertek
+                    # ezek, hogy a cell hez kepest hogyan van ez a bb
                     x_cell, y_cell = S * x - j, S * y - i  # both between [0,1]
+                    # ezekre fogunk predikalni exp vel
                     width_cell, height_cell = (
                         width * S, # ezek mindd gt-k
                         height * S,
@@ -96,6 +94,8 @@ class YOLODataset(Dataset):
 
 
 def test():
+    import wandb
+    wandb.init()
     anchors = config.ANCHORS
 
     transform = config.test_transforms

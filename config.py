@@ -6,10 +6,10 @@ from albumentations.pytorch import ToTensorV2
 
 DATASET = r'D:\Object_detection\PASCAL_VOC'
 # DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-DEVICE = "cpu"
+DEVICE = "cuda"
 # seed_everything()  # If you want deterministic behavior
 NUM_WORKERS = 4
-BATCH_SIZE = 32
+BATCH_SIZE = 1
 IMAGE_SIZE = 416
 NUM_CLASSES = 20
 LEARNING_RATE = 1e-5
@@ -20,7 +20,7 @@ MAP_IOU_THRESH = 0.5
 NMS_IOU_THRESH = 0.45
 S = [IMAGE_SIZE // 32, IMAGE_SIZE // 16, IMAGE_SIZE // 8]
 PIN_MEMORY = True
-LOAD_MODEL = False
+LOAD_MODEL = True
 SAVE_MODEL = True
 CHECKPOINT_FILE = r"D:\Checkpoints\Yolov3\yolov3_pascal_78.1map.pth.tar"
 IMG_DIR = DATASET + "/images/"

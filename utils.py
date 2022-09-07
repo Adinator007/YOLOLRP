@@ -1,3 +1,6 @@
+from torch import nn
+
+import config
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 import numpy as np
@@ -9,8 +12,6 @@ from collections import Counter
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-# from dataset import YOLODataset
-import config
 
 def iou_width_height(boxes1, boxes2):
     """
@@ -99,27 +100,27 @@ def non_max_suppression(bboxes, iou_threshold, threshold, box_format="corners"):
     assert type(bboxes) == list
 
     bboxes = [box for box in bboxes if box[1] > threshold]
-    bboxes = sorted(bboxes, key=lambda x: x[1], reverse=True) # biggest probability bb ok kerulnek elore
+    bboxes = sorted(bboxes, key=lambda x: x[1], reverse=True)
     bboxes_after_nms = []
 
-    while bboxes:
-        chosen_box = bboxes.pop(0)
+    while tqdm(bboxes):
+        chosen_box = bboxes.pop(0) # oke, ezt kesobb mentjuk el, es a maradekot igazitjuk ehhez
 
-        bboxes = [ # melyik bb ket tartjuk meg
+        bboxes = [
             box
             for box in bboxes
-            if box[0] != chosen_box[0] # class if this bb is not the same as this box
-            or intersection_over_union(
-                torch.tensor(chosen_box[2:]), # a mostani box nak a koordinataja
-                torch.tensor(box[2:]), # a mostani box
+            if box[0] != chosen_box[0] # if different classes we want to keep it
+            or intersection_over_union( # if they are from the same class, we want to compare bb s, if they dont overlap too much, than we can keep this
+                torch.tensor(chosen_box[2:]),
+                torch.tensor(box[2:]),
                 box_format=box_format,
             )
-            < iou_threshold # nem metszenek at elegge, akkor megtartjuk azt is
+            < iou_threshold
         ]
-
+        # chosen_box -> class, conf, x, y, w, h
         bboxes_after_nms.append(chosen_box)
 
-    return bboxes_after_nms
+    return bboxes_after_nms # list of lists, [[6 elemu], [6 elemu], ...] -> a fentinek megfeleloen
 
 
 def mean_average_precision(
@@ -233,13 +234,12 @@ def mean_average_precision(
     return sum(average_precisions) / len(average_precisions)
 
 
-def plot_image(image, boxes, wandb):
+def plot_image(image, boxes):
     """Plots predicted bounding boxes on the image"""
     cmap = plt.get_cmap("tab20b")
     class_labels = config.COCO_LABELS if config.DATASET=='COCO' else config.PASCAL_CLASSES
     colors = [cmap(i) for i in np.linspace(0, 1, len(class_labels))]
     im = np.array(image)
-    # wandb.log({"image": wandb.})
     height, width, _ = im.shape
 
     # Create figure and axes
@@ -287,14 +287,20 @@ def get_evaluation_bboxes(
     threshold,
     box_format="midpoint",
     device="cuda",
+    mode='eval'
 ):
     # make sure model is in eval before get bboxes
-    model.eval()
+    model.eval() if mode == 'eval' else model.train()
+    tensors = []
     train_idx = 0
     all_pred_boxes = []
     all_true_boxes = []
     for batch_idx, (x, labels) in enumerate(tqdm(loader)):
         x = x.to(device)
+
+        x = nn.Parameter(x)
+
+        tensors.append(x)
 
         with torch.no_grad():
             predictions = model(x)
@@ -311,12 +317,13 @@ def get_evaluation_bboxes(
                 bboxes[idx] += box
 
         # we just want one bbox for each label, not one for each scale
-        true_bboxes = cells_to_bboxes(
+        # a labels-ben a gt van, azt kell visszaforditani erre a formara
+        true_bboxes = cells_to_bboxes( # labels -> 32 3 13 13 6
             labels[2], anchor, S=S, is_preds=False
         )
 
         for idx in range(batch_size):
-            nms_boxes = non_max_suppression(
+            nms_boxes = non_max_suppression( # 13*13*3 + 26*26*3 + 52*52*3 darab bb t kell ki nms eznie, az ilyen hosszu
                 bboxes[idx],
                 iou_threshold=iou_threshold,
                 threshold=threshold,
@@ -331,9 +338,67 @@ def get_evaluation_bboxes(
                     all_true_boxes.append([train_idx] + box)
 
             train_idx += 1
+        break # TODO: remove
 
     model.train()
-    return all_pred_boxes, all_true_boxes
+    return all_pred_boxes, all_true_boxes, tensors # mind a 2 egy list of lists, ami 7 elemu [train_idx -> hanyadik kep a dataloader ben, de jelen esetben ez a batch ben szamolodik, class, conf, x, y, w, h]
+
+def eval_lrp(model, loader):
+    pred_boxes, true_boxes, tensors = get_evaluation_bboxes(
+        loader,
+        model,
+        iou_threshold=config.NMS_IOU_THRESH,
+        anchors=config.ANCHORS,
+        threshold=config.CONF_THRESHOLD,
+        mode='train'
+    )
+
+    for idx, box in enumerate(pred_boxes):
+        (box[1]*box[2]).backward() # azert mert az elso a train idx lenne. A batch size 1
+        plot_relevance_scores(tensors[idx], tensors[idx].grad, "output")
+
+
+    print("ok")
+
+
+
+def plot_relevance_scores(x: torch.tensor, r: torch.tensor, name: str, config: dict) -> None:
+    """Plots results from layer-wise relevance propagation next to original image.
+
+    Method currently accepts only a batch size of one.
+
+    Args:
+        x: Original image.
+        r: Relevance scores for original image.
+        name: Image name.
+        config: Dictionary holding configuration.
+
+    Returns:
+        None.
+
+    """
+    output_dir = "outputs"
+
+    fig, axes = plt.subplots(nrows=1, ncols=2, figsize=(10, 5))
+
+    x = x[0].squeeze().permute(1, 2, 0).detach().cpu()
+    x_min = x.min()
+    x_max = x.max()
+    x = (x - x_min) / (x_max - x_min)
+    axes[0].imshow(x)
+    axes[0].set_axis_off()
+
+    r_min = r.min()
+    r_max = r.max()
+    r = (r - r_min) / (r_max - r_min)
+    axes[1].imshow(r, cmap="afmhot")
+    axes[1].set_axis_off()
+
+    fig.tight_layout()
+    plt.savefig(f"{output_dir}/image_{name}.png")
+    plt.close(fig)
+
+
 
 
 def cells_to_bboxes(predictions, anchors, S, is_preds=True):
@@ -355,10 +420,10 @@ def cells_to_bboxes(predictions, anchors, S, is_preds=True):
     box_predictions = predictions[..., 1:5]
     if is_preds:
         anchors = anchors.reshape(1, len(anchors), 1, 1, 2)
-        box_predictions[..., 0:2] = torch.sigmoid(box_predictions[..., 0:2])
-        box_predictions[..., 2:] = torch.exp(box_predictions[..., 2:]) * anchors
-        scores = torch.sigmoid(predictions[..., 0:1])
-        best_class = torch.argmax(predictions[..., 5:], dim=-1).unsqueeze(-1)
+        box_predictions[..., 0:2] = torch.sigmoid(box_predictions[..., 0:2]) # box kozepe
+        box_predictions[..., 2:] = torch.exp(box_predictions[..., 2:]) * anchors # width height, aranyosan az anchor box-hoz kepest
+        scores = torch.sigmoid(predictions[..., 0:1]) # confidence, hogy van e ott object
+        best_class = torch.argmax(predictions[..., 5:], dim=-1).unsqueeze(-1) # az osztalyok
     else:
         scores = predictions[..., 0:1]
         best_class = predictions[..., 5:6]
@@ -371,9 +436,10 @@ def cells_to_bboxes(predictions, anchors, S, is_preds=True):
     )
     x = 1 / S * (box_predictions[..., 0:1] + cell_indices)
     y = 1 / S * (box_predictions[..., 1:2] + cell_indices.permute(0, 1, 3, 2, 4))
+    # 0..1 kozotti szamok lesznek
     w_h = 1 / S * box_predictions[..., 2:4]
     converted_bboxes = torch.cat((best_class, scores, x, y, w_h), dim=-1).reshape(BATCH_SIZE, num_anchors * S * S, 6)
-    return converted_bboxes.tolist()
+    return converted_bboxes.tolist() # 13*13*3 -> grid * grid * anchor darab prediction jon ki ebbol
 
 def check_class_accuracy(model, loader, threshold):
     model.eval()
@@ -443,8 +509,10 @@ def load_checkpoint(checkpoint_file, model, optimizer, lr):
     for param_group in optimizer.param_groups:
         param_group["lr"] = lr
 
+
 def get_loaders(train_csv_path, test_csv_path):
     from dataset import YOLODataset
+
     IMAGE_SIZE = config.IMAGE_SIZE
     train_dataset = YOLODataset(
         train_csv_path,
@@ -454,7 +522,6 @@ def get_loaders(train_csv_path, test_csv_path):
         label_dir=config.LABEL_DIR,
         anchors=config.ANCHORS,
     )
-
     test_dataset = YOLODataset(
         test_csv_path,
         transform=config.test_transforms,

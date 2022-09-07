@@ -57,6 +57,8 @@ def train_fn(train_loader, model, optimizer, loss_fn, scaler, scaled_anchors):
 
 
 def main():
+
+    # print("ok")
     model = YOLOv3(num_classes=config.NUM_CLASSES).to(config.DEVICE)
     optimizer = optim.Adam(
         model.parameters(), lr=config.LEARNING_RATE, weight_decay=config.WEIGHT_DECAY
@@ -90,9 +92,9 @@ def main():
         #print("On Train loader:")
         #check_class_accuracy(model, train_loader, threshold=config.CONF_THRESHOLD)
 
-        if epoch > 0 and epoch % 3 == 0:
-            check_class_accuracy(model, test_loader, threshold=config.CONF_THRESHOLD)
-            pred_boxes, true_boxes = get_evaluation_bboxes(
+        if epoch > -1 and epoch % 1 == 0:
+            # check_class_accuracy(model, test_loader, threshold=config.CONF_THRESHOLD)
+            pred_boxes, true_boxes, _ = get_evaluation_bboxes( # utolso -> tensors, amit en tettem bele
                 test_loader,
                 model,
                 iou_threshold=config.NMS_IOU_THRESH,

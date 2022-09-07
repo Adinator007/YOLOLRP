@@ -9,7 +9,7 @@ from torch.nn import ModuleList
 from YoloLRP.filter import output_relevance_filter
 from model import YOLOv3, CNNBlock, ResidualBlock, ScalePrediction
 
-from Global import activations
+from Global import grads, activationss
 
 top_k_percent = 0.04
 
@@ -52,13 +52,10 @@ def CNNBlock_hook(module: CNNBlock, input_relevance, output_relevance):
 
 
 def BatchNorm_hook(module, input_relevance, output_relevance):
-    global activations
     eps = 1e-5
-    activation = activations[module]
+    activation = activationss[module]
     # copied module
     batchnorm = deepcopy(module)
-    batchnorm.layer.weight = torch.nn.Parameter(batchnorm.weight.clamp(min=0.0))
-    batchnorm.layer.bias = torch.nn.Parameter(torch.zeros_like(batchnorm.layer.bias))
     output_relevance = output_relevance[0]
 
 
@@ -68,30 +65,25 @@ def BatchNorm_hook(module, input_relevance, output_relevance):
     # output_relevance score ok megszurve
     r = output_relevance_filter(output_relevance, top_k_percent=top_k_percent)
     # elozo aktivaciok ujboli atkuldese es eps vel megtoldasa
-    z = batchnorm.forward(activation) + eps
-    s = r / z
+    # csatornankent kell ezt megcsinalni
 
-    c = torch.mm(s, batchnorm.weight)
-    r = (activation * c).data
+    input_relevance = (r * torch.reshape(batchnorm.weight, (1, r.shape[1], 1, 1)),)
 
-    r = r * torch.rsqrt(running_var + eps)
-    # r = r + self.running_mean # ezzel nem kell foglalkozni, mert a bias nem modositja a reteg erzekenyseget a kimenetre
-
-    input_relevance = r
+    # input_relevance = r
     return input_relevance
 
 
 def Conv2d_hook(module, input_relevance, output_relevance) -> torch.Tensor:
-    global activations
-    output_relevance = output_relevance[0] # 1-tuple-be van csomagolva az elozo layer gradiense
+    output_relevance = output_relevance[0]  # 1-tuple-be van csomagolva az elozo layer gradiense
     eps = 1e-5
-    activation = activations[module]
+    activation = activationss[module]
     # copied module
     conv = deepcopy(module)
     conv.weight = torch.nn.Parameter(conv.weight.clamp(min=0.0))
-    conv.bias = torch.nn.Parameter(torch.zeros_like(conv.bias))
+    conv.bias = torch.nn.Parameter(torch.zeros_like(conv.bias)) if conv.bias is not None else None
 
-    output_relevance = output_relevance_filter(output_relevance, top_k_percent=top_k_percent)  # kiveszi a 0.04 edet a output_relevance nak
+    output_relevance = output_relevance_filter(output_relevance,
+                                               top_k_percent=top_k_percent)  # kiveszi a 0.04 edet a output_relevance nak
     z = conv.forward(activation) + eps
     s = (output_relevance / z).data
 
@@ -103,17 +95,15 @@ def Conv2d_hook(module, input_relevance, output_relevance) -> torch.Tensor:
     v.requires_grad = True
 
     v.backward(retain_graph=True)
-    c = activation.grad
+    c = grads[id(activation)]
     r = (activation * c).data
-    input_relevance = r
+    input_relevance = (r, )
     return input_relevance
 
 
-
 def Linear_hook(module, input_relevance, output_relevance) -> torch.Tensor:
-    global activations
     eps = 1e-5
-    activation = activations[module]
+    activation = activationss[module]
     # copied module
     linear = deepcopy(module)
     linear.weight = torch.nn.Parameter(linear.weight.clamp(min=0.0))
