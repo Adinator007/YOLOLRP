@@ -16,7 +16,7 @@ from utils import (
     load_checkpoint,
     check_class_accuracy,
     get_loaders,
-    plot_couple_examples
+    plot_couple_examples, plot_couple_examples2
 )
 from loss import YoloLoss
 import warnings
@@ -81,16 +81,16 @@ def main():
     ).to(config.DEVICE)
 
     for epoch in range(config.NUM_EPOCHS):
-        # plot_couple_examples(model, test_loader, 0.6, 0.5, scaled_anchors)
-        # train_fn(train_loader, model, optimizer, loss_fn, scaler, scaled_anchors)
+        plot_couple_examples2(model, test_loader, 0.6, 0.5, scaled_anchors)
+        train_fn(train_loader, model, optimizer, loss_fn, scaler, scaled_anchors)
 
-        #if config.SAVE_MODEL:
-        #    save_checkpoint(model, optimizer, filename=f"checkpoint.pth.tar")
+        if config.SAVE_MODEL:
+            save_checkpoint(model, optimizer, filename=f"checkpoint.pth.tar")
 
-        #print(f"Currently epoch {epoch}")
-        #print("On Train Eval loader:")
-        #print("On Train loader:")
-        #check_class_accuracy(model, train_loader, threshold=config.CONF_THRESHOLD)
+        print(f"Currently epoch {epoch}")
+        print("On Train Eval loader:")
+        print("On Train loader:")
+        check_class_accuracy(model, train_loader, threshold=config.CONF_THRESHOLD)
 
         if epoch > -1 and epoch % 1 == 0:
             # check_class_accuracy(model, test_loader, threshold=config.CONF_THRESHOLD)

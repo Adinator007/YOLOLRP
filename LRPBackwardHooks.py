@@ -26,18 +26,8 @@ def lookup_hook_fn():
         nn.AdaptiveAvgPool2d: AdaptiveAvgPool2D_hook,
         nn.MaxPool2d: MaxPool2D_hook,
         nn.BatchNorm2d: BatchNorm_hook
-
     }
 
-'''
-        YOLOv3: Identity_hook,
-        # CNNBlock: CNNBlock_hook,
-        ResidualBlock: Identity_hook,
-        ModuleList: Identity_hook,
-        nn.Sequential: Identity_hook,
-        ScalePrediction: Identity_hook,
-        nn.Upsample: Identity_hook
-'''
 
 '''
 def CNNBlock_hook(module: CNNBlock, input_relevance, output_relevance):

@@ -22,7 +22,7 @@ S = [IMAGE_SIZE // 32, IMAGE_SIZE // 16, IMAGE_SIZE // 8]
 PIN_MEMORY = True
 LOAD_MODEL = True
 SAVE_MODEL = True
-CHECKPOINT_FILE = r"D:\Checkpoints\Yolov3\yolov3_pascal_78.1map.pth.tar"
+CHECKPOINT_FILE = r"D:\Checkpoints\Yolov3\archive\yolov3_pascal_78.1map.pth.tar"
 IMG_DIR = DATASET + "/images/"
 LABEL_DIR = DATASET + "/labels/"
 

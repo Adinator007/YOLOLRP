@@ -79,6 +79,61 @@ def intersection_over_union(boxes_preds, boxes_labels, box_format="midpoint"):
     return intersection / (box1_area + box2_area - intersection + 1e-6)
 
 
+def original_get_evaluation_bboxes(
+    loader,
+    model,
+    iou_threshold,
+    anchors,
+    threshold,
+    box_format="midpoint",
+    device="cuda",
+):
+    # make sure model is in eval before get bboxes
+    model.eval()
+    train_idx = 0
+    images = []
+    all_pred_boxes = []
+    all_true_boxes = []
+    for batch_idx, (x, labels) in enumerate(tqdm(loader)):
+        x = x.to(device)
+        images.append(x)
+        with torch.no_grad():
+            predictions = model(x)
+
+        batch_size = x.shape[0]
+        bboxes = [[] for _ in range(batch_size)]
+        for i in range(3):
+            S = predictions[i].shape[2]
+            anchor = torch.tensor([*anchors[i]]).to(device) * S
+            boxes_scale_i = original_cells_to_bboxes(
+                predictions[i], anchor, S=S, is_preds=True
+            )
+            for idx, (box) in enumerate(boxes_scale_i):
+                bboxes[idx] += box
+
+        # we just want one bbox for each label, not one for each scale
+        true_bboxes = original_cells_to_bboxes(
+            labels[2], anchor, S=S, is_preds=False
+        )
+
+        for idx in range(batch_size):
+            nms_boxes = original_non_max_suppression(
+                bboxes[idx],
+                iou_threshold=iou_threshold,
+                threshold=threshold,
+                box_format=box_format,
+            )
+
+            for nms_box in nms_boxes:
+                all_pred_boxes.append([train_idx] + nms_box)
+
+            for box in true_bboxes[idx]:
+                if box[1] > threshold:
+                    all_true_boxes.append([train_idx] + box)
+            train_idx += 1
+    model.train()
+    return all_pred_boxes, all_true_boxes, images
+
 def non_max_suppression(bboxes, iou_threshold, threshold, box_format="corners"):
     """
     Video explanation of this function:
@@ -87,7 +142,7 @@ def non_max_suppression(bboxes, iou_threshold, threshold, box_format="corners"):
     Does Non Max Suppression given bboxes
 
     Parameters:
-        bboxes (list): list of lists containing all bboxes with each bboxes
+        bboxes (list): list of tensors containing all bboxes with each bboxes
         specified as [class_pred, prob_score, x1, y1, x2, y2]
         iou_threshold (float): threshold where predicted bboxes is correct
         threshold (float): threshold to remove predicted bboxes (independent of IoU)
@@ -104,8 +159,7 @@ def non_max_suppression(bboxes, iou_threshold, threshold, box_format="corners"):
     bboxes_after_nms = []
 
     while tqdm(bboxes):
-        chosen_box = bboxes.pop(0) # oke, ezt kesobb mentjuk el, es a maradekot igazitjuk ehhez
-
+        chosen_box = bboxes.pop(0)
         bboxes = [
             box
             for box in bboxes
@@ -119,6 +173,7 @@ def non_max_suppression(bboxes, iou_threshold, threshold, box_format="corners"):
         ]
         # chosen_box -> class, conf, x, y, w, h
         bboxes_after_nms.append(chosen_box)
+        return bboxes_after_nms # TODO change this, only for faster nms to see 1 box
 
     return bboxes_after_nms # list of lists, [[6 elemu], [6 elemu], ...] -> a fentinek megfeleloen
 
@@ -234,6 +289,122 @@ def mean_average_precision(
     return sum(average_precisions) / len(average_precisions)
 
 
+
+def original_non_max_suppression(bboxes, iou_threshold, threshold, box_format="corners"):
+    """
+    Video explanation of this function:
+    https://youtu.be/YDkjWEN8jNA
+    Does Non Max Suppression given bboxes
+    Parameters:
+        bboxes (list): list of lists containing all bboxes with each bboxes
+        specified as [class_pred, prob_score, x1, y1, x2, y2]
+        iou_threshold (float): threshold where predicted bboxes is correct
+        threshold (float): threshold to remove predicted bboxes (independent of IoU)
+        box_format (str): "midpoint" or "corners" used to specify bboxes
+    Returns:
+        list: bboxes after performing NMS given a specific IoU threshold
+    """
+
+    assert type(bboxes) == list
+
+    bboxes = [box for box in bboxes if box[1] > threshold]
+    bboxes = sorted(bboxes, key=lambda x: x[1], reverse=True)
+    bboxes_after_nms = []
+
+    while bboxes:
+        chosen_box = bboxes.pop(0)
+
+        bboxes = [
+            box
+            for box in bboxes
+            if box[0] != chosen_box[0]
+            or intersection_over_union(
+                torch.tensor(chosen_box[2:]),
+                torch.tensor(box[2:]),
+                box_format=box_format,
+            )
+            < iou_threshold
+        ]
+
+        bboxes_after_nms.append(chosen_box)
+
+    return bboxes_after_nms
+
+
+def original_cells_to_bboxes(predictions, anchors, S, is_preds=True):
+    """
+    Scales the predictions coming from the model to
+    be relative to the entire image such that they for example later
+    can be plotted or.
+    INPUT:
+    predictions: tensor of size (N, 3, S, S, num_classes+5)
+    anchors: the anchors used for the predictions
+    S: the number of cells the image is divided in on the width (and height)
+    is_preds: whether the input is predictions or the true bounding boxes
+    OUTPUT:
+    converted_bboxes: the converted boxes of sizes (N, num_anchors, S, S, 1+5) with class index,
+                      object score, bounding box coordinates
+    """
+    BATCH_SIZE = predictions.shape[0]
+    num_anchors = len(anchors)
+    box_predictions = predictions[..., 1:5]
+    if is_preds:
+        anchors = anchors.reshape(1, len(anchors), 1, 1, 2)
+        box_predictions[..., 0:2] = torch.sigmoid(box_predictions[..., 0:2])
+        box_predictions[..., 2:] = torch.exp(box_predictions[..., 2:]) * anchors
+        scores = torch.sigmoid(predictions[..., 0:1])
+        best_class = torch.argmax(predictions[..., 5:], dim=-1).unsqueeze(-1)
+    else:
+        scores = predictions[..., 0:1]
+        best_class = predictions[..., 5:6]
+
+    cell_indices = (
+        torch.arange(S)
+        .repeat(predictions.shape[0], 3, S, 1)
+        .unsqueeze(-1)
+        .to(predictions.device)
+    )
+    x = 1 / S * (box_predictions[..., 0:1] + cell_indices)
+    y = 1 / S * (box_predictions[..., 1:2] + cell_indices.permute(0, 1, 3, 2, 4))
+    w_h = 1 / S * box_predictions[..., 2:4]
+    converted_bboxes = torch.cat((best_class, scores, x, y, w_h), dim=-1).reshape(BATCH_SIZE, num_anchors * S * S, 6)
+    return converted_bboxes.tolist()
+
+
+
+
+
+
+
+def plot_couple_examples2(model, img, thresh, iou_thresh, anchors):
+    model.eval()
+    img = img.to(config.DEVICE)
+    with torch.no_grad():
+        out = model(img)
+        bboxes = [[] for _ in range(img.shape[0])]
+        for i in range(3):
+            batch_size, A, S, _, _ = out[i].shape
+            anchor = anchors[i]
+            boxes_scale_i = cells_to_bboxes(
+                out[i], anchor, S=S, is_preds=True
+            )
+            for idx, (box) in enumerate(boxes_scale_i):
+                bboxes[idx] += box
+
+        model.train()
+
+    for i in range(batch_size):
+        nms_boxes = non_max_suppression(
+            bboxes[i], iou_threshold=iou_thresh, threshold=thresh, box_format="midpoint",
+        )
+        plot_image(img[i].permute(1, 2, 0).detach().cpu(), nms_boxes)
+
+
+
+
+
+
+
 def plot_image(image, boxes):
     """Plots predicted bounding boxes on the image"""
     cmap = plt.get_cmap("tab20b")
@@ -252,6 +423,7 @@ def plot_image(image, boxes):
 
     # Create a Rectangle patch
     for box in boxes:
+        box = box[1:]
         assert len(box) == 6, "box should contain class pred, confidence, x, y, width, height"
         class_pred = box[0]
         box = box[2:]
@@ -302,7 +474,10 @@ def get_evaluation_bboxes(
 
         tensors.append(x)
 
-        with torch.no_grad():
+        if mode == 'eval':
+            with torch.no_grad():
+                predictions = model(x)
+        else:
             predictions = model(x)
 
         batch_size = x.shape[0]
@@ -311,33 +486,41 @@ def get_evaluation_bboxes(
             S = predictions[i].shape[2]
             anchor = torch.tensor([*anchors[i]]).to(device) * S
             boxes_scale_i = cells_to_bboxes(
-                predictions[i], anchor, S=S, is_preds=True
+                predictions[i], anchor, S=S, is_preds=True, output_tensor=True # arra kell, hogy a vegen a heat map latszodjon
             )
             for idx, (box) in enumerate(boxes_scale_i):
                 bboxes[idx] += box
 
         # we just want one bbox for each label, not one for each scale
         # a labels-ben a gt van, azt kell visszaforditani erre a formara
+        '''
         true_bboxes = cells_to_bboxes( # labels -> 32 3 13 13 6
             labels[2], anchor, S=S, is_preds=False
         )
+        '''
 
         for idx in range(batch_size):
             nms_boxes = non_max_suppression( # 13*13*3 + 26*26*3 + 52*52*3 darab bb t kell ki nms eznie, az ilyen hosszu
-                bboxes[idx],
+                bboxes[idx], # list of tensors, rosszul van a comment az nms fejeben
                 iou_threshold=iou_threshold,
                 threshold=threshold,
                 box_format=box_format,
             )
 
             for nms_box in nms_boxes:
-                all_pred_boxes.append([train_idx] + nms_box)
+                all_pred_boxes.append(
+                    torch.cat((torch.tensor([train_idx]).to(config.DEVICE), nms_box), dim=0)
+                    # [train_idx] + nms_box
+                )
 
+            ''' 
             for box in true_bboxes[idx]:
                 if box[1] > threshold:
                     all_true_boxes.append([train_idx] + box)
+            '''
 
             train_idx += 1
+        return all_pred_boxes, None, tensors # TODO: remove
         break # TODO: remove
 
     model.train()
@@ -353,16 +536,15 @@ def eval_lrp(model, loader):
         mode='train'
     )
 
-    for idx, box in enumerate(pred_boxes):
-        (box[1]*box[2]).backward() # azert mert az elso a train idx lenne. A batch size 1
-        plot_relevance_scores(tensors[idx], tensors[idx].grad, "output")
+    for box in pred_boxes:
+        output = (box[1] * box[2]).sum()
+    output.backward()
+
+    plot_relevance_scores(tensors[0], tensors[0].grad, "output4") # change according to what is on the input
+    return tensors[0], pred_boxes
 
 
-    print("ok")
-
-
-
-def plot_relevance_scores(x: torch.tensor, r: torch.tensor, name: str, config: dict) -> None:
+def plot_relevance_scores(x: torch.tensor, r: torch.tensor, name: str, config: dict = None) -> None:
     """Plots results from layer-wise relevance propagation next to original image.
 
     Method currently accepts only a batch size of one.
@@ -391,7 +573,7 @@ def plot_relevance_scores(x: torch.tensor, r: torch.tensor, name: str, config: d
     r_min = r.min()
     r_max = r.max()
     r = (r - r_min) / (r_max - r_min)
-    axes[1].imshow(r, cmap="afmhot")
+    axes[1].imshow(torch.permute(r.squeeze_(0), (1, 2, 0)).cpu(), cmap="afmhot")
     axes[1].set_axis_off()
 
     fig.tight_layout()
@@ -401,7 +583,7 @@ def plot_relevance_scores(x: torch.tensor, r: torch.tensor, name: str, config: d
 
 
 
-def cells_to_bboxes(predictions, anchors, S, is_preds=True):
+def cells_to_bboxes(predictions, anchors, S, is_preds=True, output_tensor=False):
     """
     Scales the predictions coming from the model to
     be relative to the entire image such that they for example later
@@ -424,6 +606,7 @@ def cells_to_bboxes(predictions, anchors, S, is_preds=True):
         box_predictions[..., 2:] = torch.exp(box_predictions[..., 2:]) * anchors # width height, aranyosan az anchor box-hoz kepest
         scores = torch.sigmoid(predictions[..., 0:1]) # confidence, hogy van e ott object
         best_class = torch.argmax(predictions[..., 5:], dim=-1).unsqueeze(-1) # az osztalyok
+        best_class_score = torch.amax(predictions[..., 5:], dim=-1, keepdim=True)
     else:
         scores = predictions[..., 0:1]
         best_class = predictions[..., 5:6]
@@ -438,8 +621,9 @@ def cells_to_bboxes(predictions, anchors, S, is_preds=True):
     y = 1 / S * (box_predictions[..., 1:2] + cell_indices.permute(0, 1, 3, 2, 4))
     # 0..1 kozotti szamok lesznek
     w_h = 1 / S * box_predictions[..., 2:4]
-    converted_bboxes = torch.cat((best_class, scores, x, y, w_h), dim=-1).reshape(BATCH_SIZE, num_anchors * S * S, 6)
-    return converted_bboxes.tolist() # 13*13*3 -> grid * grid * anchor darab prediction jon ki ebbol
+    # TODO: best_class, best_class_score-ra lett kicserelve
+    converted_bboxes = torch.cat((best_class_score, scores, x, y, w_h), dim=-1).reshape(BATCH_SIZE, num_anchors * S * S, 6)
+    return converted_bboxes.tolist() if output_tensor == False else converted_bboxes # 13*13*3 -> grid * grid * anchor darab prediction jon ki ebbol
 
 def check_class_accuracy(model, loader, threshold):
     model.eval()
@@ -502,12 +686,13 @@ def load_checkpoint(checkpoint_file, model, optimizer, lr):
     print("=> Loading checkpoint")
     checkpoint = torch.load(checkpoint_file, map_location=config.DEVICE)
     model.load_state_dict(checkpoint["state_dict"])
-    optimizer.load_state_dict(checkpoint["optimizer"])
+    if optimizer is not None:
+        optimizer.load_state_dict(checkpoint["optimizer"])
 
-    # If we don't do this then it will just have learning rate of old checkpoint
-    # and it will lead to many hours of debugging \:
-    for param_group in optimizer.param_groups:
-        param_group["lr"] = lr
+        # If we don't do this then it will just have learning rate of old checkpoint
+        # and it will lead to many hours of debugging \:
+        for param_group in optimizer.param_groups:
+            param_group["lr"] = lr
 
 
 def get_loaders(train_csv_path, test_csv_path):
@@ -565,6 +750,34 @@ def get_loaders(train_csv_path, test_csv_path):
     )
 
     return train_loader, test_loader, train_eval_loader
+
+
+
+def plot_couple_examples2(model, loader, thresh, iou_thresh, anchors):
+    model.eval()
+    x, y = next(iter(loader))
+    x = x.to("cuda")
+    with torch.no_grad():
+        out = model(x)
+        bboxes = [[] for _ in range(x.shape[0])]
+        for i in range(3):
+            batch_size, A, S, _, _ = out[i].shape
+            anchor = anchors[i]
+            boxes_scale_i = original_cells_to_bboxes(
+                out[i], anchor, S=S, is_preds=True
+            )
+            for idx, (box) in enumerate(boxes_scale_i):
+                bboxes[idx] += box
+
+        model.train()
+
+    for i in range(batch_size):
+        nms_boxes = original_non_max_suppression(
+            bboxes[i], iou_threshold=iou_thresh, threshold=thresh, box_format="midpoint",
+        )
+        plot_image(x[i].permute(1,2,0).detach().cpu(), nms_boxes)
+
+
 
 def plot_couple_examples(model, loader, thresh, iou_thresh, anchors):
     model.eval()

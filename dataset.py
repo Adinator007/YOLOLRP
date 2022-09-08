@@ -94,8 +94,6 @@ class YOLODataset(Dataset):
 
 
 def test():
-    import wandb
-    wandb.init()
     anchors = config.ANCHORS
 
     transform = config.test_transforms
@@ -125,10 +123,7 @@ def test():
             )[0]
         boxes = non_max_suppression(boxes, iou_threshold=1, threshold=0.7, box_format="midpoint")
         print(boxes)
-        plot_image(x[0].permute(1, 2, 0).to("cpu"), boxes, wandb)
-
-
-    wandb.finsh
+        plot_image(x[0].permute(1, 2, 0).to("cpu"), boxes)
 
 if __name__ == "__main__":
     test()

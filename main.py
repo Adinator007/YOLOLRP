@@ -9,7 +9,8 @@ from YoloLRP.lrp import LRPModel
 from model import YOLOv3, CNNBlock
 
 from Global import grads, activationss
-from utils import eval_lrp, get_loaders
+from utils import eval_lrp, get_loaders, original_get_evaluation_bboxes, plot_image, plot_couple_examples2, \
+    load_checkpoint
 
 
 def store_activations(x, y, z): # maga a modell, a bemenete a layer nek
@@ -20,7 +21,32 @@ def b_hook(x, y, z):
     # return torch.tensor([95]).float()
 
 
-import ctypes
+IMAGE_SIZE = (416, 416)
+
+
+class YOLOBox:
+    def __init__(self, t, mode='YOLO'):
+        if mode == 'YOLO':
+            x, y, w, h = t
+            x = x*IMAGE_SIZE[1]
+            y = y*IMAGE_SIZE[0]
+            w = w*IMAGE_SIZE[0]
+            h = h*IMAGE_SIZE[1]
+
+            self.xmin = x - w/2
+            self.xmax = x + w/2
+            self.ymin = y - h/2
+            self.ymax = y + h/2
+
+        elif mode == 'COCO':
+            self.xmin = t[0]
+            self.ymin = t[1]
+            self.xmax = t[2]
+            self.ymax = t[3]
+        else:
+            print('Invalid model parameter')
+
+idx = 0
 
 def main():
     def save_grad(activation):
@@ -56,10 +82,81 @@ def main():
     model = YOLOv3(num_classes=config.NUM_CLASSES).to(config.DEVICE)
     model.train()
 
+    '''
+    loader, _, _ = get_loaders(train_csv_path=config.DATASET + "/train.csv", test_csv_path=config.DATASET + "/test.csv")
+    imgs, boxes = eval_lrp(model, loader)
 
-    _, loader, _ = get_loaders(train_csv_path=config.DATASET + "/train.csv", test_csv_path=config.DATASET + "/test.csv")
-    eval_lrp(model, loader)
+    classes = [torch.tensor([1])]
+
+    import wandb
+    wandb.init("yolo_visualization")
+
+    table = wandb.Table(columns=["id", "image_and_boxes"])
+
+    def bounding_boxes(raw_image, v_boxes, v_clsids, v_scores, log_width=1024, log_height=1024):
+        global idx
+        # load raw input photo
+        all_boxes = []
+        # plot each bounding box for this image
+        for b_i, box in enumerate(v_boxes):
+            # get coordinates and labels
+            box_data = {
+                "position": {
+                    "minX": int(box.xmin.item()),
+                    "maxX": int(box.xmax.item()),
+                    "minY": int(box.ymin.item()),
+                    "maxY": int(box.ymax.item())
+                },
+                "class_id": int(v_clsids[b_i].item()),
+                # optionally caption each box with its class and score
+                "box_caption": "%s (%.3f)" % (v_clsids[b_i], v_scores[b_i] if v_scores is not None else 1),
+                "domain": "pixel",
+                # "scores": {"score": v_scores[b_i].item()}
+                "scores": {"score": 1}
+            }
+            all_boxes.append(box_data)
+
+        # log to wandb: raw image, predictions, and dictionary of class labels for each class id
+        box_image = wandb.Image(raw_image,
+                                boxes={"predictions": {"box_data": all_boxes, "class_labels": {k: v for k, v in enumerate(config.PASCAL_CLASSES)}}})
+
+        # ID -> LABEL
+
+        table.add_data(idx, box_image)
+        idx += 1
+
+        return box_image
+
+    def visualize_wandb(imgs, boxes, classes, scoress):
+        if scoress is not None:
+            for img, bbs, clss, scores in zip(imgs, boxes, classes, scoress):
+                bounding_boxes(img, bbs, clss, scores)
+        else:
+            for img, bbs, clss in zip(imgs, boxes, classes):
+                bounding_boxes(img, bbs, clss, None)
+
+    bboxes = []
+
+    for box in boxes:
+        bboxes.append(
+            [YOLOBox(
+                (box[3].cpu(), box[4].cpu(), box[5].cpu(), box[6].cpu()),
+                mode='YOLO'
+            )] # TODO rewrite for generic bb
+        )
+
+    visualize_wandb(imgs, bboxes, classes, None) # imgs, boxes, classes, scoress
+
+    wandb.log(
+        {
+            "table": table
+        }
+    )
+
+    wandb.finish()
+
     return
+    '''
 
     #torch torch.save(model, "bestModel.pth")
     '''torch.onnx.export(model,  # model being run
@@ -187,5 +284,48 @@ def main2():
 
 
 
+def main3():
+    loader, _, _ = get_loaders(train_csv_path=config.DATASET + "/1examples.csv", test_csv_path=config.DATASET + "/1examples.csv")
+    model = YOLOv3(num_classes=config.NUM_CLASSES).to(config.DEVICE)
+    pred_boxes, true_boxes, images = original_get_evaluation_bboxes(
+        loader,
+        model,
+        iou_threshold=config.NMS_IOU_THRESH,
+        anchors=config.ANCHORS,
+        threshold=config.CONF_THRESHOLD,
+    )
+
+    scaled_anchors = (
+            torch.tensor(config.ANCHORS)
+            * torch.tensor(config.S).unsqueeze(1).unsqueeze(1).repeat(1, 3, 2)
+    ).to(config.DEVICE)
+
+    plot_couple_examples2(model, images[0], 0.6, 0.5, scaled_anchors)
+
+
+def main4():
+
+    def save_grad(activation):
+        def hook(grad):
+            grads[id(activation)] = grad
+
+        return hook
+
+    model = YOLOv3(num_classes=config.NUM_CLASSES).to(config.DEVICE)
+    load_checkpoint(config.CHECKPOINT_FILE, model, None, None)  # checkpoint_file, model, optimizer, lr
+
+    lut = lookup_hook_fn()
+    for name, module in model.named_modules():
+        module.register_forward_hook(store_activations)
+        if module.__class__ in lut.keys():
+            module.register_full_backward_hook(lut[module.__class__])
+
+    yoloInput = nn.Parameter(torch.ones(2, 3, 416, 416).float().to(config.DEVICE))
+    res = model(yoloInput)
+    for activation in activationss.values():
+        activation.register_hook(save_grad(activation))
+    torch.sum(res[0][:, :, :, :]).backward(retain_graph=True)
+
+
 if __name__ == '__main__':
-    main()
+    main4()
